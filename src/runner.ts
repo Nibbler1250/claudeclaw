@@ -1,10 +1,12 @@
+import { spawn as nodeSpawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
-import { getSession, createSession, incrementTurn, markCompactWarned } from "./sessions";
+import { getSession, createSession, resetSession, incrementTurn, markCompactWarned } from "./sessions";
 import {
   getThreadSession,
   createThreadSession,
+  removeThreadSession,
   incrementThreadTurn,
   markThreadCompactWarned,
 } from "./sessionManager";
@@ -106,7 +108,10 @@ function buildChildEnv(baseEnv: Record<string, string>, model: string, api: stri
   const childEnv: Record<string, string> = { ...baseEnv };
   const normalizedModel = model.trim().toLowerCase();
 
-  if (api.trim()) childEnv.ANTHROPIC_AUTH_TOKEN = api.trim();
+  if (api.trim()) {
+    childEnv.ANTHROPIC_AUTH_TOKEN = api.trim();
+    childEnv.CLAUDE_CODE_OAUTH_TOKEN = api.trim();
+  }
 
   if (normalizedModel === "glm") {
     childEnv.ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic";
@@ -130,45 +135,75 @@ async function runClaudeOnce(
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
 
-  const proc = Bun.spawn(args, {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: buildChildEnv(baseEnv, model, api),
+  console.log(`[SPAWN-NODE] args count: ${args.length}, append-prompt-len: ${args[args.indexOf("--append-system-prompt")+1]?.length || 0}`);
+  const childEnv = buildChildEnv(baseEnv, model, api);
+  const [cmd, ...spawnArgs] = args;
+
+  // VERBOSE DIAG
+  const diagId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  const diagFile = join(LOGS_DIR, `diag-${diagId}.log`);
+  const diagLines: string[] = [];
+  const diag = (msg: string) => {
+    diagLines.push(`[${new Date().toISOString()}] ${msg}`);
+  };
+  diag(`cmd=${args[0]} argc=${args.length} cwd=${process.cwd()}`);
+  const resumeIdx = args.indexOf("--resume");
+  if (resumeIdx >= 0) diag(`resume=${args[resumeIdx + 1]}`);
+  diag(`model=${model} hasAuth=${!!childEnv.ANTHROPIC_AUTH_TOKEN || !!childEnv.CLAUDE_CODE_OAUTH_TOKEN} baseUrl=${childEnv.ANTHROPIC_BASE_URL || "default"}`);
+
+  return new Promise((resolve) => {
+    const startMs = Date.now();
+    const proc = nodeSpawn(cmd, spawnArgs, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: childEnv,
+    });
+    diag(`spawned pid=${proc.pid}`);
+
+    let rawStdout = "";
+    let stderr = "";
+    let settled = false;
+
+    proc.stdout!.on("data", (chunk: Buffer) => { rawStdout += chunk.toString(); });
+    proc.stderr!.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try { proc.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
+        diag(`TIMEOUT after ${timeoutMs/1000}s`);
+        writeFile(diagFile, diagLines.join("\n") + "\n").catch(() => {});
+        console.error(`[${new Date().toLocaleTimeString()}] Claude session timed out after ${timeoutMs / 1000}s`);
+        resolve({ rawStdout: "", stderr: "timeout", exitCode: 124 });
+      }
+    }, timeoutMs);
+
+    proc.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        const finalCode = code ?? 1;
+        const elapsed = Date.now() - startMs;
+        diag(`close code=${finalCode} signal=${signal} elapsed=${elapsed}ms stdout.len=${rawStdout.length} stderr.len=${stderr.length}`);
+        diag(`stdout.first300=${JSON.stringify(rawStdout.slice(0, 300))}`);
+        diag(`stderr.full=${JSON.stringify(stderr)}`);
+        if (finalCode !== 0 || rawStdout.length === 0) {
+          writeFile(diagFile, diagLines.join("\n") + "\n").catch(() => {});
+        }
+        console.log(`[${new Date().toLocaleTimeString()}] node-spawn exit=${finalCode}, stdout=${rawStdout.length}, stderr=${stderr.slice(0,500)}, diag=${finalCode !== 0 ? diagId : "ok"}`);
+        resolve({ rawStdout, stderr, exitCode: finalCode });
+      }
+    });
+
+    proc.on("error", (err: Error) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        console.error(`[${new Date().toLocaleTimeString()}] spawn error: ${err.message}`);
+        resolve({ rawStdout: "", stderr: err.message, exitCode: 124 });
+      }
+    });
   });
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`Claude session timed out after ${timeoutMs / 1000}s`)), timeoutMs);
-  });
-
-  try {
-    const [rawStdout, stderr] = await Promise.race([
-      Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]),
-      timeoutPromise,
-    ]) as [string, string];
-    await proc.exited;
-
-    return {
-      rawStdout,
-      stderr,
-      exitCode: proc.exitCode ?? 1,
-    };
-  } catch (err) {
-    // Kill the hung process
-    try { proc.kill("SIGTERM"); } catch {}
-    setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 5000);
-
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[${new Date().toLocaleTimeString()}] ${message}`);
-
-    return {
-      rawStdout: "",
-      stderr: message,
-      exitCode: 124,
-    };
-  }
 }
 
 const PROJECT_DIR = process.cwd();
@@ -386,7 +421,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
 
   // New session: use json output to capture Claude's session_id
   // Resumed session: use text output with --resume
-  const outputFormat = isNew ? "json" : "text";
+  const outputFormat = "json";
   const args = ["claude", "-p", prompt, "--output-format", outputFormat, ...securityArgs];
 
   if (!isNew) {
@@ -435,7 +470,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
 
   const rawStdout = exec.rawStdout;
   const stderr = exec.stderr;
-  const exitCode = exec.exitCode;
+  let exitCode = exec.exitCode;
   let stdout = rawStdout;
   let sessionId = existing?.sessionId ?? "unknown";
   const rateLimitMessage = extractRateLimitMessage(rawStdout, stderr);
@@ -444,23 +479,39 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
     stdout = rateLimitMessage;
   }
 
-  // For new sessions, parse the JSON to extract session_id and result text
-  if (!rateLimitMessage && isNew && exitCode === 0) {
+  // For new sessions, parse the JSON to extract session_id and result text.
+  // Also attempt JSON parse if exitCode != 0 but output looks like a successful JSON result —
+  // guards against Bun race condition where proc.exitCode reads as null → 1 even on success.
+  const looksLikeJsonResult = rawStdout.trimStart().startsWith("{") && rawStdout.includes('"session_id"');
+  if (!rateLimitMessage && (exitCode === 0 || looksLikeJsonResult)) {
     try {
       const json = JSON.parse(rawStdout);
-      sessionId = json.session_id;
-      stdout = json.result ?? "";
-      // Save the real session ID from Claude Code
-      if (threadId) {
-        await createThreadSession(threadId, sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
-      } else {
-        await createSession(sessionId);
-        console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
+      if (json.session_id) {
+        sessionId = json.session_id;
+        stdout = json.result ?? "";
+        // If JSON parse succeeded and is_error is false, treat as success regardless of exitCode
+        if (!json.is_error) {
+          exitCode = 0;
+        }
+        // Save the real session ID from Claude Code
+        if (threadId) {
+          await createThreadSession(threadId, sessionId);
+          console.log(`[${new Date().toLocaleTimeString()}] Thread session created: ${sessionId} (thread ${threadId.slice(0, 8)})`);
+        } else {
+          await createSession(sessionId);
+          console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
+        }
       }
     } catch (e) {
       console.error(`[${new Date().toLocaleTimeString()}] Failed to parse session from Claude output:`, e);
     }
+  }
+
+  // Guard against Bun proc.exitCode race condition: if claude produced output
+  // and no stderr, treat as success even if Bun reported exit code 1.
+  if (exitCode !== 0 && stdout.trim() && !stderr.trim() && !rateLimitMessage) {
+    console.log(`[${new Date().toLocaleTimeString()}] Overriding exit code ${exitCode} → 0 (stdout present, no stderr)`);
+    exitCode = 0;
   }
 
   const result: RunResult = {
@@ -485,6 +536,49 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
 
   await Bun.write(logFile, output);
   console.log(`[${new Date().toLocaleTimeString()}] Done: ${name} → ${logFile}`);
+
+  // --- Auto-recovery: if resume failed (exit != 0, no output), nuke session & retry as new ---
+  console.log(`[${new Date().toLocaleTimeString()}] Post-run: isNew=${isNew}, exitCode=${exitCode}, stdoutLen=${stdout.length}, stdoutTrimmed="${stdout.trim().slice(0, 50)}", stderrLen=${stderr.length}`);
+  if (!isNew && exitCode !== 0 && !stdout.trim()) {
+    console.log(`[${new Date().toLocaleTimeString()}] Resume failed (exit ${exitCode}, no output) — nuking session and retrying as new`);
+    if (threadId) {
+      await removeThreadSession(threadId);
+    } else {
+      await resetSession();
+    }
+    // Rebuild args for a fresh session (json output, no --resume)
+    const freshArgs = ["claude", "-p", prompt, "--output-format", "json", ...securityArgs];
+    if (appendParts.length > 0) {
+      freshArgs.push("--append-system-prompt", appendParts.join("\n\n"));
+    }
+    const freshExec = await runClaudeOnce(freshArgs, primaryConfig.model, primaryConfig.api, baseEnv, timeoutMs);
+    let freshStdout = freshExec.rawStdout;
+    let freshExitCode = freshExec.exitCode;
+    let freshSessionId = "unknown";
+    const freshLooksLikeJson = freshStdout.trimStart().startsWith("{") && freshStdout.includes('"session_id"');
+    if (freshExitCode === 0 || freshLooksLikeJson) {
+      try {
+        const json = JSON.parse(freshStdout);
+        if (json.session_id) {
+          freshSessionId = json.session_id;
+          freshStdout = json.result ?? "";
+          if (!json.is_error) freshExitCode = 0;
+          if (threadId) {
+            await createThreadSession(threadId, freshSessionId);
+          } else {
+            await createSession(freshSessionId);
+          }
+          console.log(`[${new Date().toLocaleTimeString()}] Auto-recovery: new session ${freshSessionId}`);
+        }
+      } catch (e) {
+        console.error(`[${new Date().toLocaleTimeString()}] Auto-recovery JSON parse failed:`, e);
+      }
+    }
+    if (freshExitCode !== 0 && freshStdout.trim() && !freshExec.stderr.trim()) {
+      freshExitCode = 0;
+    }
+    return { stdout: freshStdout, stderr: freshExec.stderr, exitCode: freshExitCode };
+  }
 
   // --- Auto-compact on timeout (exit 124) ---
   if (COMPACT_TIMEOUT_ENABLED && exitCode === 124 && !isNew && existing) {

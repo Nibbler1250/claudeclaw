@@ -1,15 +1,12 @@
-_Learn about the person you're helping. Update this as you go._
-
-- **Name:**
-- **What to call them:**
-- **Pronouns:** _(optional)_
-- **Timezone:**
-- **Notes:**
+- **Name:** Simon Pelletier
+- **What to call them:** Simon
+- **Timezone:** America/Toronto (EST/EDT)
+- **Notes:** Superviseur MOW à IOC (Iron Ore Company), développeur AI hobby. Famille: Caroline, Raphaël, Henri.
 
 ## Context
 
-_(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_
+Simon gère: Momentum Trader V7 (algo trading Python/IBKR), Family Hub (domotique SvelteKit+FastAPI), Auto Hub (automations), MealDeal (app repas Railway/Vercel), setup domotique Hubitat (51 devices Z-Wave/Zigbee).
 
----
-
-The more you know, the better you can help. But remember — you're learning about a person, not building a dossier. Respect the difference.
+Abonnement Claude Max — tokens illimités.
+Quiet hours: 20h-6h (pas de notifications non-critiques).
+Communication: toujours français québécois informel, court et direct.
