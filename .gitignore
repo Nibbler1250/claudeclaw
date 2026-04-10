@@ -1,4 +1,6 @@
 .claude
 node_modules
 .codemachine
-AGENTS.md
+AGENTS.mddist/
+package-lock.json
+*.bak-*
