@@ -903,6 +903,43 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
     return;
   }
 
+  // Pending actions pattern: "pending:<id>:<decision>"
+  // <id> is a positive integer, <decision> is alphanumeric + underscores.
+  // Delegates to python3 ~/agent/lib/pending.py which updates SQLite and
+  // edits the original Telegram message with the new status.
+  const pendingMatch = data.match(/^pending:(\d+):([a-zA-Z0-9_]+)$/);
+  if (pendingMatch) {
+    const actionId = pendingMatch[1];
+    const decision = pendingMatch[2];
+    let answerText = "⚠️ Erreur";
+    try {
+      const proc = Bun.spawn(
+        ["python3", `${homedir()}/agent/lib/pending.py`, "resolve", actionId, decision],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+      const exitCode = await proc.exited;
+      const stdout = await new Response(proc.stdout).text();
+      if (exitCode === 0 && stdout.includes("Resolved: True")) {
+        if (decision === "skip") {
+          answerText = "⏸ Reporté";
+        } else if (decision === "cancel" || decision === "reject") {
+          answerText = "❌ Rejeté";
+        } else {
+          answerText = "✅ Approuvé";
+        }
+      } else {
+        answerText = "⚠️ Déjà résolu ou introuvable";
+      }
+    } catch (err) {
+      console.error(`[Telegram] pending action error: ${err instanceof Error ? err.message : err}`);
+    }
+    await callApi(config.token, "answerCallbackQuery", {
+      callback_query_id: query.id,
+      text: answerText,
+    }).catch(() => {});
+    return;
+  }
+
   // Default: ack with no text
   await callApi(config.token, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
 }
