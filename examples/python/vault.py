@@ -21,8 +21,8 @@ except ImportError:
     print("ERROR: pip3 install cryptography", file=sys.stderr)
     sys.exit(1)
 
-VAULT_FILE = Path.home() / "agent" / "vault" / "secrets.enc"
-KEY_FILE = Path.home() / "agent" / "vault" / ".vault_key"
+VAULT_FILE = Path.home() / ".claudeclaw" / "vault" / "secrets.enc"
+KEY_FILE = Path.home() / ".claudeclaw" / "vault" / ".vault_key"
 
 
 def _get_key() -> bytes:
