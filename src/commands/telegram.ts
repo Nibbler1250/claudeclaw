@@ -924,6 +924,8 @@ async function handleCallbackQuery(query: TelegramCallbackQuery): Promise<void> 
           answerText = "⏸ Reporté";
         } else if (decision === "cancel" || decision === "reject") {
           answerText = "❌ Rejeté";
+        } else if (decision === "details" || decision === "mute_pattern") {
+          answerText = decision === "details" ? "📋 Détails envoyés" : "🔇 Type muté";
         } else {
           answerText = "✅ Approuvé";
         }
