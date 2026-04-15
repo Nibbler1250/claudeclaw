@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { join } from "path";
+import { homedir } from "os";
 import { existsSync } from "fs";
 import { getSession, createSession, resetSession, incrementTurn, markCompactWarned } from "./sessions";
 import {
@@ -448,6 +449,31 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   }
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
+
+  // Inject recent conversation history when starting a fresh session (no resume)
+  if (isNew) {
+    try {
+      const historyPath = join(homedir(), "agent", "data", "telegram-history.jsonl");
+      if (existsSync(historyPath)) {
+        const raw = await Bun.file(historyPath).text();
+        const lines = raw.trim().split("\n").filter(Boolean);
+        const recent = lines.slice(-10).map((l) => JSON.parse(l));
+        if (recent.length > 0) {
+          const historyText = recent
+            .map((e: { timestamp: string; user: string; assistant: string }) =>
+              `[${e.timestamp}]\nSimon: ${e.user}\nGreg: ${e.assistant}`
+            )
+            .join("\n---\n");
+          appendParts.push(
+            `## Historique conversation récente (avant redémarrage session)\nContexte des derniers échanges Telegram pour assurer la continuité :\n\n${historyText}`
+          );
+        }
+      }
+    } catch (e) {
+      console.error(`[runner] Failed to load conversation history:`, e);
+    }
+  }
+
   if (appendParts.length > 0) {
     args.push("--append-system-prompt", appendParts.join("\n\n"));
   }

@@ -1,7 +1,7 @@
 import { ensureProjectClaudeMd, run, runUserMessage, compactCurrentSession } from "../runner";
 import { getSettings, loadSettings } from "../config";
 import { resetSession, peekSession } from "../sessions";
-import { readFile } from "node:fs/promises";
+import { readFile, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { transcribeAudioToText } from "../whisper";
@@ -858,6 +858,14 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       if (!cleanedText && filePaths.length === 0) {
         await sendMessage(config.token, chatId, "(empty response)", threadId);
       }
+      // Log exchange to conversation history for session recovery
+      const historyPath = join(homedir(), "agent", "data", "telegram-history.jsonl");
+      const entry = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        user: text.trim().slice(0, 500),
+        assistant: (cleanedText || "").slice(0, 1000),
+      });
+      await appendFile(historyPath, entry + "\n").catch(() => {});
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
