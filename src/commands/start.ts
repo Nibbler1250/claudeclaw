@@ -712,7 +712,7 @@ export async function start(args: string[] = []) {
   function runJob(job: (typeof currentJobs)[0]) {
     const timeoutMs = job.timeoutSeconds ? job.timeoutSeconds * 1000 : undefined;
     resolvePrompt(job.prompt)
-      .then((prompt) => run(job.name, prompt, job.agent ? undefined : job.name, job.model, timeoutMs, job.agent))
+      .then((prompt) => run(job.name, prompt, job.agent ? `agent:${job.agent}` : job.name, job.model, timeoutMs, job.agent))
       .then((r) => {
         // Reset retry state on success
         if (r.exitCode === 0) {
