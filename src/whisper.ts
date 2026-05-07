@@ -60,6 +60,7 @@ const BINARY_SOURCES: Record<string, BinarySource> = {
 };
 
 let warmupPromise: Promise<void> | null = null;
+let warmupModel: string | null = null;
 
 type WhisperDebugLog = (message: string) => void;
 
@@ -308,11 +309,18 @@ async function ensureWavInput(inputPath: string, log: WhisperDebugLog): Promise<
 
 export function warmupWhisperAssets(options?: { printOutput?: boolean }): Promise<void> {
   const printOutput = options?.printOutput ?? false;
+  const currentModel = getWhisperModel();
+  if (warmupPromise && warmupModel !== currentModel) {
+    console.log(`whisper warmup: model changed ${warmupModel} -> ${currentModel}, re-warming`);
+    warmupPromise = null;
+  }
   if (!warmupPromise) {
-    console.log(`whisper warmup: creating warmup promise printOutput=${printOutput}`);
+    console.log(`whisper warmup: creating warmup promise printOutput=${printOutput} model=${currentModel}`);
+    warmupModel = currentModel;
     warmupPromise = prepareWhisperAssets(printOutput).catch((err) => {
       console.error(`whisper warmup: failed - ${err instanceof Error ? err.message : String(err)}`);
       warmupPromise = null;
+      warmupModel = null;
       throw err;
     });
   } else {
@@ -411,6 +419,7 @@ export async function transcribeAudioToText(
       if (!(err instanceof Error) || !err.message.includes("ENOENT")) throw err;
       log("voice transcribe: missing whisper executable, forcing re-download and retry");
       warmupPromise = null;
+      warmupModel = null;
       await rm(BIN_DIR, { recursive: true, force: true });
       await warmupWhisperAssets();
       rawOutput = runTranscription();
